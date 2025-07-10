@@ -1,0 +1,152 @@
+name: Run Robot Framework Tests on iOS
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.9'
+
+    - name: Install Robot Framework and Appium Library
+      run: |
+        python -m pip install --upgrade pip
+        pip install robotframework-requests
+        pip install robotframework
+        pip install robotframework-appiumlibrary
+        pip install appium-python-client
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Appium and Drivers (via npm)
+      run: |
+        npm install -g appium@latest
+        appium driver install xcuitest
+        # If your app has web views:
+        # appium driver install safari
+
+    - name: Install and Run Appium Server
+      run: |
+        # Make sure RunAppiumServer.sh exists in your scripts folder and starts the Appium server in background.
+        # This script should ideally just run `appium > appium.log 2>&1 &`
+        chmod +x ./scripts/RunAppiumServer.sh
+        ./scripts/RunAppiumServer.sh
+
+    - name: Select Xcode 16.2
+      run: sudo xcode-select -switch /Applications/Xcode_16.2.app
+
+    - name: Extract iOS App Bundle from IPA
+      id: extract_app
+      run: |
+        IPA_PATH="RESOURCES/Append.ipa"
+        EXTRACT_DIR="extracted_app"    
+
+        echo "Extracting IPA from $IPA_PATH to $EXTRACT_DIR..."
+        mkdir -p "$EXTRACT_DIR"
+        unzip -q "$IPA_PATH" -d "$EXTRACT_DIR" # Unzip quietly
+
+        APP_BUNDLE_PATH=$(find "$EXTRACT_DIR/Payload" -maxdepth 1 -type d -name "*.app" | head -n 1)
+
+        if [ -z "$APP_BUNDLE_PATH" ]; then
+            echo "Error: .app bundle not found inside $IPA_PATH after extraction!"
+            ls -R "$EXTRACT_DIR" # List extracted contents for debugging
+            exit 1
+        fi
+
+        echo "Extracted .app bundle path: $APP_BUNDLE_PATH"
+        echo "IOS_APP_PATH=$APP_BUNDLE_PATH" >> $GITHUB_ENV
+
+    - name: Debug iOS App Architecture
+      run: |
+        APP_BUNDLE_PATH="${{ env.IOS_APP_PATH }}"
+        if [ -z "$APP_BUNDLE_PATH" ]; then exit 1; fi
+        APP_EXECUTABLE_NAME="$(basename "$APP_BUNDLE_PATH" .app)"
+        EXECUTABLE_PATH="$APP_BUNDLE_PATH/$APP_EXECUTABLE_NAME"
+
+        echo "Checking architecture of executable: $EXECUTABLE_PATH"
+        if [ ! -f "$EXECUTABLE_PATH" ]; then
+            echo "Error: Executable file not found at $EXECUTABLE_PATH"
+            ls -l "$APP_BUNDLE_PATH" # List bundle contents for debugging
+            exit 1
+        fi
+
+        lipo -info "$EXECUTABLE_PATH"
+
+        echo "--- Expected Architectures for Apple Silicon iOS Simulator (macos-latest) ---"
+        echo "You should see 'arm64' (specifically for arm64-simulator target) or 'x86_64 arm64' (Universal 2)."
+        echo "If it only says 'arm64' AND you're still getting the architecture error, it's likely a device build."
+
+    - name: Start iOS Simulator
+      run: |
+        SIM_NAME="iPhone 15"
+        SIM_RUNTIME_ID="com.apple.CoreSimulator.SimRuntime.iOS-17-0"
+
+        echo "Listing available devicetypes before creation attempt:"
+        xcrun simctl list devicetypes | grep "iPhone"
+        echo "Listing available runtimes before creation attempt:"
+        xcrun simctl list runtimes | grep "iOS"
+
+        DEVICE_TYPE_ID=$(xcrun simctl list devicetypes | grep "$SIM_NAME" | awk -F '[()]' '{print $2}' | head -n 1)
+        if [ -z "$DEVICE_TYPE_ID" ]; then
+            echo "Error: Device type '$SIM_NAME' not found in devicetypes list!"
+            exit 1
+        fi
+        echo "Found device type ID: $DEVICE_TYPE_ID"
+        echo "Using runtime ID: $SIM_RUNTIME_ID"
+
+        SIM_UDID=$(xcrun simctl list devices Runtimes/"$SIM_RUNTIME_ID" | grep "$SIM_NAME" | grep -o -E '[0-9A-F]{8}-([0-9A-F]{4}-){3}[0-9A-F]{12}' | head -n 1)
+
+        if [ -z "$SIM_UDID" ]; then
+          echo "Simulator '$SIM_NAME' with runtime '$SIM_RUNTIME_ID' not found. Creating a new one..."
+          SIM_UDID=$(xcrun simctl create "$SIM_NAME" "$DEVICE_TYPE_ID" "$SIM_RUNTIME_ID")
+          echo "Created simulator with UDID: $SIM_UDID"
+        else
+          echo "Found simulator with UDID: $SIM_UDID"
+        fi
+
+        echo "Booting simulator $SIM_UDID"
+        xcrun simctl boot "$SIM_UDID" || true
+
+        echo "Waiting for simulator $SIM_UDID to be ready..."
+        xcrun simctl bootstatus "$SIM_UDID" # No -t option needed
+
+        echo "Simulator $SIM_UDID is ready."
+        echo "SIMULATOR_UDID=$SIM_UDID" >> $GITHUB_ENV
+
+    - name: Install App on Simulator
+      run: |
+        APP_PATH="${{ env.IOS_APP_PATH }}"
+        SIM_UDID="${{ env.SIMULATOR_UDID }}"
+
+        if [ -z "$APP_PATH" ] || [ -z "$SIM_UDID" ]; then
+          echo "Error: App path or simulator UDID not set. Cannot install app."
+          exit 1
+        fi
+
+        echo "Attempting to install $APP_PATH on simulator $SIM_UDID"
+        xcrun simctl install "$SIM_UDID" "$APP_PATH"
+
+        echo "App installed successfully (via simctl install)."
+
+    - name: Run Robot Framework Tests
+      run: |
+        sleep 10
+        robot --outputdir results TEST/splash.robot
+
+    - name: Teardown Simulator
+      if: always()
+      run: |
+        if [ -n "$SIMULATOR_UDID" ]; then
+          echo "Shutting down simulator $SIMULATOR_UDID"
+          xcrun simctl shutdown "$SIMULATOR_UDID"
+        fi
