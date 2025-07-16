@@ -150,3 +150,12 @@ jobs:
           echo "Shutting down simulator $SIMULATOR_UDID"
           xcrun simctl shutdown "$SIMULATOR_UDID"
         fi
+
+    - name: Upload test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: robot-test-results
+        path: |
+          output/
+          junit-report.xml
