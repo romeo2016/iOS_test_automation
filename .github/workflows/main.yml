@@ -142,7 +142,7 @@ jobs:
     - name: Run Robot Framework Tests
       run: |
         sleep 10
-        robot --outputdir results TEST/splash.robot
+        robot --outputdir results --xunit results/junit-report.xml TEST/splash.robot
 
     - name: Teardown Simulator
       if: always()
@@ -158,5 +158,5 @@ jobs:
       with:
         name: robot-test-results
         path: |
-          output/
-          junit-report.xml
+          results/
+          results/junit-report.xml
